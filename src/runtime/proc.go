@@ -529,8 +529,8 @@ var (
 	allglock mutex
 	allgs    []*g
 
-	// allglen and allgptr are atomic variables that contain len(allg) and
-	// &allg[0] respectively. Proper ordering depends on totally-ordered
+	// allglen and allgptr are atomic variables that contain len(allgs) and
+	// &allgs[0] respectively. Proper ordering depends on totally-ordered
 	// loads and stores. Writes are protected by allglock.
 	//
 	// allgptr is updated before allglen. Readers should read allglen
@@ -1521,6 +1521,8 @@ found:
 		sched.freem = m
 	}
 	unlock(&sched.lock)
+
+	atomic.Xadd64(&ncgocall, int64(m.ncgocall))
 
 	// Release the P.
 	handoffp(releasep())
@@ -4917,7 +4919,6 @@ func (pp *p) destroy() {
 		moveTimers(plocal, pp.timers)
 		pp.timers = nil
 		pp.numTimers = 0
-		pp.adjustTimers = 0
 		pp.deletedTimers = 0
 		atomic.Store64(&pp.timer0When, 0)
 		unlock(&pp.timersLock)

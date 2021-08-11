@@ -107,10 +107,14 @@ type Type interface {
 
 	// ConvertibleTo reports whether a value of the type is convertible to type u.
 	// Even if ConvertibleTo returns true, the conversion may still panic.
+	// For example, a slice of type []T is convertible to *[N]T,
+	// but the conversion will panic if its length is less than N.
 	ConvertibleTo(u Type) bool
 
 	// Comparable reports whether values of this type are comparable.
 	// Even if Comparable returns true, the comparison may still panic.
+	// For example, values of interface type are comparable,
+	// but the comparison will panic if their dynamic type is not comparable.
 	Comparable() bool
 
 	// Methods applicable only to some types, depending on Kind.
@@ -224,7 +228,7 @@ type Type interface {
 // See https://golang.org/issue/4876 for more details.
 
 /*
- * These data structures are known to the compiler (../../cmd/internal/gc/reflect.go).
+ * These data structures are known to the compiler (../../cmd/internal/reflectdata/reflect.go).
  * A few are known to ../runtime/type.go to convey to debuggers.
  * They are also known to ../runtime/type.go.
  */
@@ -267,7 +271,7 @@ const (
 // available in the memory directly following the rtype value.
 //
 // tflag values must be kept in sync with copies in:
-//	cmd/compile/internal/gc/reflect.go
+//	cmd/compile/internal/reflectdata/reflect.go
 //	cmd/link/internal/ld/decodesym.go
 //	runtime/type.go
 type tflag uint8
@@ -1906,7 +1910,7 @@ func MapOf(key, elem Type) Type {
 
 	// Make a map type.
 	// Note: flag values must match those used in the TMAP case
-	// in ../cmd/compile/internal/gc/reflect.go:writeType.
+	// in ../cmd/compile/internal/reflectdata/reflect.go:writeType.
 	var imap interface{} = (map[unsafe.Pointer]unsafe.Pointer)(nil)
 	mt := **(**mapType)(unsafe.Pointer(&imap))
 	mt.str = resolveReflectName(newName(s, "", false))
@@ -2837,7 +2841,7 @@ func runtimeStructField(field StructField) (structField, string) {
 
 // typeptrdata returns the length in bytes of the prefix of t
 // containing pointer data. Anything after this offset is scalar data.
-// keep in sync with ../cmd/compile/internal/gc/reflect.go
+// keep in sync with ../cmd/compile/internal/reflectdata/reflect.go
 func typeptrdata(t *rtype) uintptr {
 	switch t.Kind() {
 	case Struct:
@@ -2861,7 +2865,7 @@ func typeptrdata(t *rtype) uintptr {
 	}
 }
 
-// See cmd/compile/internal/gc/reflect.go for derivation of constant.
+// See cmd/compile/internal/reflectdata/reflect.go for derivation of constant.
 const maxPtrmaskBytes = 2048
 
 // ArrayOf returns the array type with the given length and element type.
