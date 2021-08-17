@@ -30,9 +30,9 @@ import (
 	"cmd/go/internal/load"
 	"cmd/go/internal/lockedfile"
 	"cmd/go/internal/search"
-	"cmd/go/internal/str"
 	"cmd/go/internal/trace"
 	"cmd/go/internal/work"
+	"cmd/internal/str"
 	"cmd/internal/test2json"
 )
 
@@ -241,6 +241,10 @@ control the execution of any test:
 
 	-failfast
 	    Do not start new tests after the first test failure.
+
+	-json
+	    Log verbose output and test results in JSON. This presents the
+	    same information as the -v flag in a machine-readable format.
 
 	-list regexp
 	    List tests, benchmarks, or examples matching the regular expression.
