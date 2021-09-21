@@ -671,6 +671,15 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 		// TODO(gri) Should we pass x.typ instead of base (and have indirect report if derefStructPtr indirected)?
 		check.recordSelection(selx, FieldVal, base, obj, index, false)
 
+		// record the selector expression (was bug - issue #47895)
+		{
+			mode := value
+			if x.mode == variable || indirect {
+				mode = variable
+			}
+			check.record(&operand{mode, selx, obj.Type(), nil, 0})
+		}
+
 		// The field offset is considered a variable even if the field is declared before
 		// the part of the struct which is variable-sized. This makes both the rules
 		// simpler and also permits (or at least doesn't prevent) a compiler from re-
@@ -763,7 +772,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 		var t operand
 		x1 := x
 		for _, arg := range call.Args {
-			check.rawExpr(x1, arg, nil) // permit trace for types, e.g.: new(trace(T))
+			check.rawExpr(x1, arg, nil, false) // permit trace for types, e.g.: new(trace(T))
 			check.dump("%v: %s", x1.Pos(), x1)
 			x1 = &t // use incoming x only for first argument
 		}
@@ -821,7 +830,7 @@ func (check *Checker) applyTypeFunc(f func(Type) Type, x Type) Type {
 		// type param is placed in the current package so export/import
 		// works as expected.
 		tpar := NewTypeName(token.NoPos, check.pkg, "<type parameter>", nil)
-		ptyp := check.NewTypeParam(tpar, NewInterfaceType(nil, []Type{NewUnion(terms)})) // assigns type to tpar as a side-effect
+		ptyp := check.newTypeParam(tpar, NewInterfaceType(nil, []Type{NewUnion(terms)})) // assigns type to tpar as a side-effect
 		ptyp.index = tp.index
 
 		return ptyp

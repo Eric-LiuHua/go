@@ -278,9 +278,21 @@ func NewTypeName(pos syntax.Pos, pkg *Package, name string, typ Type) *TypeName 
 
 // NewTypeNameLazy returns a new defined type like NewTypeName, but it
 // lazily calls resolve to finish constructing the Named object.
-func NewTypeNameLazy(pos syntax.Pos, pkg *Package, name string, resolve func(named *Named) (tparams []*TypeName, underlying Type, methods []*Func)) *TypeName {
+func NewTypeNameLazy(pos syntax.Pos, pkg *Package, name string, load func(named *Named) (tparams []*TypeParam, underlying Type, methods []*Func)) *TypeName {
 	obj := NewTypeName(pos, pkg, name, nil)
-	NewNamed(obj, nil, nil).resolve = resolve
+
+	resolve := func(_ *Environment, t *Named) (*TypeParamList, Type, []*Func) {
+		tparams, underlying, methods := load(t)
+
+		switch underlying.(type) {
+		case nil, *Named:
+			panic(fmt.Sprintf("invalid underlying type %T", t.underlying))
+		}
+
+		return bindTParams(tparams), underlying, methods
+	}
+
+	NewNamed(obj, nil, nil).resolver = resolve
 	return obj
 }
 
@@ -351,7 +363,8 @@ func (*Var) isDependency() {} // a variable may be a dependency of an initializa
 // An abstract method may belong to many interfaces due to embedding.
 type Func struct {
 	object
-	hasPtrRecv bool // only valid for methods that don't have a type yet
+	instRecv   *Named // if non-nil, the receiver type for an incomplete instance method
+	hasPtrRecv bool   // only valid for methods that don't have a type yet
 }
 
 // NewFunc returns a new function with the given signature, representing
@@ -362,7 +375,7 @@ func NewFunc(pos syntax.Pos, pkg *Package, name string, sig *Signature) *Func {
 	if sig != nil {
 		typ = sig
 	}
-	return &Func{object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}, false}
+	return &Func{object{nil, pos, pkg, name, typ, 0, colorFor(typ), nopos}, nil, false}
 }
 
 // FullName returns the package- or receiver-type-qualified name of
@@ -475,8 +488,8 @@ func writeObject(buf *bytes.Buffer, obj Object, qf Qualifier) {
 		if _, ok := typ.(*Basic); ok {
 			return
 		}
-		if named, _ := typ.(*Named); named != nil && named.TParams().Len() > 0 {
-			writeTParamList(buf, named.TParams().list(), qf, nil)
+		if named, _ := typ.(*Named); named != nil && named.TypeParams().Len() > 0 {
+			newTypeWriter(buf, qf).tParamList(named.TypeParams().list())
 		}
 		if tname.IsAlias() {
 			buf.WriteString(" =")

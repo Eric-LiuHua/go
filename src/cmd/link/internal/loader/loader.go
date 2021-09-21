@@ -1209,6 +1209,15 @@ func (l *Loader) IsItab(i Sym) bool {
 	return r.Sym(li).IsItab()
 }
 
+// Returns whether this symbol is a dictionary symbol.
+func (l *Loader) IsDict(i Sym) bool {
+	if l.IsExternal(i) {
+		return false
+	}
+	r, li := l.toLocal(i)
+	return r.Sym(li).IsDict()
+}
+
 // Return whether this is a trampoline of a deferreturn call.
 func (l *Loader) IsDeferReturnTramp(i Sym) bool {
 	return l.deferReturnTramp[i]
@@ -2209,7 +2218,6 @@ func (l *Loader) LoadSyms(arch *sys.Arch) {
 	// Index 0 is invalid for symbols.
 	l.objSyms = make([]objSym, 1, symSize)
 
-	l.npkgsyms = l.NSym()
 	st := loadState{
 		l:            l,
 		hashed64Syms: make(map[uint64]symAndSize, hashed64Size),
@@ -2219,6 +2227,7 @@ func (l *Loader) LoadSyms(arch *sys.Arch) {
 	for _, o := range l.objs[goObjStart:] {
 		st.preloadSyms(o.r, pkgDef)
 	}
+	l.npkgsyms = l.NSym()
 	for _, o := range l.objs[goObjStart:] {
 		st.preloadSyms(o.r, hashed64Def)
 		st.preloadSyms(o.r, hashedDef)

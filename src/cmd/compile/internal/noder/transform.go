@@ -157,7 +157,7 @@ func transformCall(n *ir.CallExpr) {
 		n.SetOp(ir.OCALLFUNC)
 	}
 
-	typecheckaste(ir.OCALL, n.X, n.IsDDD, t.Params(), n.Args, false)
+	typecheckaste(ir.OCALL, n.X, n.IsDDD, t.Params(), n.Args)
 	if l.Op() == ir.ODOTMETH && len(deref(n.X.Type().Recv().Type).RParams()) == 0 {
 		typecheck.FixMethodCall(n)
 	}
@@ -195,7 +195,7 @@ func transformCompare(n *ir.BinaryExpr) {
 			aop, _ := typecheck.Assignop(lt, rt)
 			if aop != ir.OXXX {
 				types.CalcSize(lt)
-				if lt.HasTParam() || rt.IsInterface() == lt.IsInterface() || lt.Width >= 1<<16 {
+				if lt.HasShape() || rt.IsInterface() == lt.IsInterface() || lt.Size() >= 1<<16 {
 					l = ir.NewConvExpr(base.Pos, aop, rt, l)
 					l.SetTypecheck(1)
 				}
@@ -208,7 +208,7 @@ func transformCompare(n *ir.BinaryExpr) {
 			aop, _ := typecheck.Assignop(rt, lt)
 			if aop != ir.OXXX {
 				types.CalcSize(rt)
-				if rt.HasTParam() || rt.IsInterface() == lt.IsInterface() || rt.Width >= 1<<16 {
+				if rt.HasTParam() || rt.IsInterface() == lt.IsInterface() || rt.Size() >= 1<<16 {
 					r = ir.NewConvExpr(base.Pos, aop, lt, r)
 					r.SetTypecheck(1)
 				}
@@ -404,11 +404,15 @@ func assignconvfn(n ir.Node, t *types.Type) ir.Node {
 		return n
 	}
 
-	if types.Identical(n.Type(), t) {
+	if n.Op() == ir.OPAREN {
+		n = n.(*ir.ParenExpr).X
+	}
+
+	if types.IdenticalStrict(n.Type(), t) {
 		return n
 	}
 
-	op, why := typecheck.Assignop(n.Type(), t)
+	op, why := Assignop(n.Type(), t)
 	if op == ir.OXXX {
 		base.Fatalf("found illegal assignment %+v -> %+v; %s", n.Type(), t, why)
 	}
@@ -419,11 +423,35 @@ func assignconvfn(n ir.Node, t *types.Type) ir.Node {
 	return r
 }
 
+func Assignop(src, dst *types.Type) (ir.Op, string) {
+	if src == dst {
+		return ir.OCONVNOP, ""
+	}
+	if src == nil || dst == nil || src.Kind() == types.TFORW || dst.Kind() == types.TFORW || src.Underlying() == nil || dst.Underlying() == nil {
+		return ir.OXXX, ""
+	}
+
+	// 1. src type is identical to dst (taking shapes into account)
+	if types.Identical(src, dst) {
+		// We already know from assignconvfn above that IdenticalStrict(src,
+		// dst) is false, so the types are not exactly the same and one of
+		// src or dst is a shape. If dst is an interface (which means src is
+		// an interface too), we need a real OCONVIFACE op; otherwise we need a
+		// OCONVNOP. See issue #48453.
+		if dst.IsInterface() {
+			return ir.OCONVIFACE, ""
+		} else {
+			return ir.OCONVNOP, ""
+		}
+	}
+	return typecheck.Assignop1(src, dst)
+}
+
 // Corresponds to typecheck.typecheckaste, but we add an extra flag convifaceOnly
 // only. If convifaceOnly is true, we only do interface conversion. We use this to do
 // early insertion of CONVIFACE nodes during noder2, when the function or args may
 // have typeparams.
-func typecheckaste(op ir.Op, call ir.Node, isddd bool, tstruct *types.Type, nl ir.Nodes, convifaceOnly bool) {
+func typecheckaste(op ir.Op, call ir.Node, isddd bool, tstruct *types.Type, nl ir.Nodes) {
 	var t *types.Type
 	var i int
 
@@ -442,7 +470,7 @@ func typecheckaste(op ir.Op, call ir.Node, isddd bool, tstruct *types.Type, nl i
 			if isddd {
 				n = nl[i]
 				ir.SetPos(n)
-				if n.Type() != nil && (!convifaceOnly || t.IsInterface()) {
+				if n.Type() != nil {
 					nl[i] = assignconvfn(n, t)
 				}
 				return
@@ -452,7 +480,7 @@ func typecheckaste(op ir.Op, call ir.Node, isddd bool, tstruct *types.Type, nl i
 			for ; i < len(nl); i++ {
 				n = nl[i]
 				ir.SetPos(n)
-				if n.Type() != nil && (!convifaceOnly || t.IsInterface()) {
+				if n.Type() != nil {
 					nl[i] = assignconvfn(n, t.Elem())
 				}
 			}
@@ -461,7 +489,7 @@ func typecheckaste(op ir.Op, call ir.Node, isddd bool, tstruct *types.Type, nl i
 
 		n = nl[i]
 		ir.SetPos(n)
-		if n.Type() != nil && (!convifaceOnly || t.IsInterface()) {
+		if n.Type() != nil {
 			nl[i] = assignconvfn(n, t)
 		}
 		i++
@@ -483,7 +511,7 @@ func transformReturn(rs *ir.ReturnStmt) {
 		return
 	}
 
-	typecheckaste(ir.ORETURN, nil, false, ir.CurFunc.Type().Results(), nl, false)
+	typecheckaste(ir.ORETURN, nil, false, ir.CurFunc.Type().Results(), nl)
 }
 
 // transformSelect transforms a select node, creating an assignment list as needed
@@ -493,10 +521,16 @@ func transformSelect(sel *ir.SelectStmt) {
 		if ncase.Comm != nil {
 			n := ncase.Comm
 			oselrecv2 := func(dst, recv ir.Node, def bool) {
-				n := ir.NewAssignListStmt(n.Pos(), ir.OSELRECV2, []ir.Node{dst, ir.BlankNode}, []ir.Node{recv})
-				n.Def = def
-				n.SetTypecheck(1)
-				ncase.Comm = n
+				selrecv := ir.NewAssignListStmt(n.Pos(), ir.OSELRECV2, []ir.Node{dst, ir.BlankNode}, []ir.Node{recv})
+				if dst.Op() == ir.ONAME && dst.(*ir.Name).Defn == n {
+					// Must fix Defn for dst, since we are
+					// completely changing the node.
+					dst.(*ir.Name).Defn = selrecv
+				}
+				selrecv.Def = def
+				selrecv.SetTypecheck(1)
+				selrecv.SetInit(n.Init())
+				ncase.Comm = selrecv
 			}
 			switch n.Op() {
 			case ir.OAS:
@@ -578,11 +612,7 @@ func transformDot(n *ir.SelectorExpr, isCall bool) ir.Node {
 
 	if (n.Op() == ir.ODOTINTER || n.Op() == ir.ODOTMETH) && !isCall {
 		n.SetOp(ir.OMETHVALUE)
-		if len(n.X.Type().RParams()) > 0 || n.X.Type().IsPtr() && len(n.X.Type().Elem().RParams()) > 0 {
-			// TODO: MethodValueWrapper needed for generics?
-			// Or did we successfully desugar all that at stencil time?
-			return n
-		}
+		// This converts a method type to a function type. See issue 47775.
 		n.SetType(typecheck.NewMethodType(n.Type(), nil))
 	}
 	return n
@@ -815,7 +845,10 @@ func transformBuiltin(n *ir.CallExpr) ir.Node {
 			return transformRealImag(u1.(*ir.UnaryExpr))
 		case ir.OPANIC:
 			return transformPanic(u1.(*ir.UnaryExpr))
-		case ir.OCLOSE, ir.ONEW, ir.OALIGNOF, ir.OOFFSETOF, ir.OSIZEOF:
+		case ir.OALIGNOF, ir.OOFFSETOF, ir.OSIZEOF:
+			// This corresponds to the EvalConst() call near end of typecheck().
+			return typecheck.EvalConst(u1)
+		case ir.OCLOSE, ir.ONEW:
 			// nothing more to do
 			return u1
 		}

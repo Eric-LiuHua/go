@@ -436,6 +436,11 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			if weak && !ldr.AttrReachable(rs) {
 				continue
 			}
+			if ldr.SymSect(rs) == nil {
+				st.err.Errorf(s, "unreachable sym in relocation: %s", ldr.SymName(rs))
+				continue
+			}
+
 			// The method offset tables using this relocation expect the offset to be relative
 			// to the start of the first text section, even if there are multiple.
 			if ldr.SymSect(rs).Name == ".text" {
@@ -1705,21 +1710,9 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 	}
 	ldr := ctxt.loader
 
-	// .got (and .toc on ppc64)
+	// .got
 	if len(state.data[sym.SELFGOT]) > 0 {
-		sect := state.allocateNamedSectionAndAssignSyms(&Segdata, ".got", sym.SELFGOT, sym.SDATA, 06)
-		if ctxt.IsPPC64() {
-			for _, s := range state.data[sym.SELFGOT] {
-				// Resolve .TOC. symbol for this object file (ppc64)
-
-				toc := ldr.Lookup(".TOC.", int(ldr.SymVersion(s)))
-				if toc != 0 {
-					ldr.SetSymSect(toc, sect)
-					ldr.AddInteriorSym(s, toc)
-					ldr.SetSymValue(toc, 0x8000)
-				}
-			}
-		}
+		state.allocateNamedSectionAndAssignSyms(&Segdata, ".got", sym.SELFGOT, sym.SDATA, 06)
 	}
 
 	/* pointer-free data */
@@ -1789,7 +1782,9 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 
 	// Coverage instrumentation counters for libfuzzer.
 	if len(state.data[sym.SLIBFUZZER_EXTRA_COUNTER]) > 0 {
-		state.allocateNamedSectionAndAssignSyms(&Segdata, "__libfuzzer_extra_counters", sym.SLIBFUZZER_EXTRA_COUNTER, sym.Sxxx, 06)
+		sect := state.allocateNamedSectionAndAssignSyms(&Segdata, "__libfuzzer_extra_counters", sym.SLIBFUZZER_EXTRA_COUNTER, sym.Sxxx, 06)
+		ldr.SetSymSect(ldr.LookupOrCreateSym("internal/fuzz._counters", 0), sect)
+		ldr.SetSymSect(ldr.LookupOrCreateSym("internal/fuzz._ecounters", 0), sect)
 	}
 
 	if len(state.data[sym.STLSBSS]) > 0 {
@@ -2529,6 +2524,7 @@ func (ctxt *Link) address() []*sym.Segment {
 	var noptr *sym.Section
 	var bss *sym.Section
 	var noptrbss *sym.Section
+	var fuzzCounters *sym.Section
 	for i, s := range Segdata.Sections {
 		if (ctxt.IsELF || ctxt.HeadType == objabi.Haix) && s.Name == ".tbss" {
 			continue
@@ -2540,17 +2536,17 @@ func (ctxt *Link) address() []*sym.Segment {
 		s.Vaddr = va
 		va += uint64(vlen)
 		Segdata.Length = va - Segdata.Vaddr
-		if s.Name == ".data" {
+		switch s.Name {
+		case ".data":
 			data = s
-		}
-		if s.Name == ".noptrdata" {
+		case ".noptrdata":
 			noptr = s
-		}
-		if s.Name == ".bss" {
+		case ".bss":
 			bss = s
-		}
-		if s.Name == ".noptrbss" {
+		case ".noptrbss":
 			noptrbss = s
+		case "__libfuzzer_extra_counters":
+			fuzzCounters = s
 		}
 	}
 
@@ -2667,6 +2663,11 @@ func (ctxt *Link) address() []*sym.Segment {
 	ctxt.xdefine("runtime.enoptrbss", sym.SNOPTRBSS, int64(noptrbss.Vaddr+noptrbss.Length))
 	ctxt.xdefine("runtime.end", sym.SBSS, int64(Segdata.Vaddr+Segdata.Length))
 
+	if fuzzCounters != nil {
+		ctxt.xdefine("internal/fuzz._counters", sym.SLIBFUZZER_EXTRA_COUNTER, int64(fuzzCounters.Vaddr))
+		ctxt.xdefine("internal/fuzz._ecounters", sym.SLIBFUZZER_EXTRA_COUNTER, int64(fuzzCounters.Vaddr+fuzzCounters.Length))
+	}
+
 	if ctxt.IsSolaris() {
 		// On Solaris, in the runtime it sets the external names of the
 		// end symbols. Unset them and define separate symbols, so we
@@ -2683,6 +2684,24 @@ func (ctxt *Link) address() []*sym.Segment {
 		ldr.SetSymSect(ldr.Lookup("_etext", 0), ldr.SymSect(etext))
 		ldr.SetSymSect(ldr.Lookup("_edata", 0), ldr.SymSect(edata))
 		ldr.SetSymSect(ldr.Lookup("_end", 0), ldr.SymSect(end))
+	}
+
+	if ctxt.IsPPC64() && ctxt.IsElf() {
+		// Resolve .TOC. symbols for all objects. Only one TOC region is supported. If a
+		// GOT section is present, compute it as suggested by the ELFv2 ABI. Otherwise,
+		// choose a similar offset from the start of the data segment.
+		tocAddr := int64(Segdata.Vaddr) + 0x8000
+		if gotAddr := ldr.SymValue(ctxt.GOT); gotAddr != 0 {
+			tocAddr = gotAddr + 0x8000
+		}
+		for i, _ := range ctxt.DotTOC {
+			if i >= sym.SymVerABICount && i < sym.SymVerStatic { // these versions are not used currently
+				continue
+			}
+			if toc := ldr.Lookup(".TOC.", i); toc != 0 {
+				ldr.SetSymValue(toc, tocAddr)
+			}
+		}
 	}
 
 	return order

@@ -40,6 +40,7 @@ type Name struct {
 	Class     Class      // uint8
 	pragma    PragmaFlag // int16
 	flags     bitset16
+	DictIndex uint16 // index of the dictionary entry describing the type of this variable declaration plus 1
 	sym       *types.Sym
 	Func      *Func // TODO(austin): nil for I.M, eqFor, hashfor, and hashmem
 	Offset_   int64
@@ -51,6 +52,8 @@ type Name struct {
 	// For a local variable (not param) or extern, the initializing assignment (OAS or OAS2).
 	// For a closure var, the ONAME node of the outer captured variable.
 	// For the case-local variables of a type switch, the type switch guard (OTYPESW).
+	// For a range variable, the range statement (ORANGE)
+	// For a recv variable in a case of a select statement, the receive assignment (OSELRECV2)
 	// For the name of a function, points to corresponding Func node.
 	Defn Node
 
@@ -404,9 +407,7 @@ func CaptureName(pos src.XPos, fn *Func, n *Name) *Name {
 	if n.Op() != ONAME || n.Curfn == nil {
 		return n // okay to use directly
 	}
-	if n.IsClosureVar() && n.Sym().Name != ".dict" {
-		// Note: capturing dictionary closure variables is ok. This makes
-		// sure the generated code is correctly optimized.
+	if n.IsClosureVar() {
 		base.FatalfAt(pos, "misuse of CaptureName on closure variable: %v", n)
 	}
 

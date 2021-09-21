@@ -89,7 +89,6 @@ type Checker struct {
 	nextID  uint64                 // unique Id for type parameters (first valid Id is 1)
 	objMap  map[Object]*declInfo   // maps package-level objects and (non-interface) methods to declaration info
 	impMap  map[importKey]*Package // maps (import path, source directory) to (complete or fake) package
-	typMap  map[string]*Named      // maps an instantiated named type hash to a *Named type
 
 	// pkgPathMap maps package names to the set of distinct import paths we've
 	// seen for that name, anywhere in the import graph. It is used for
@@ -174,6 +173,11 @@ func NewChecker(conf *Config, fset *token.FileSet, pkg *Package, info *Info) *Ch
 		conf = new(Config)
 	}
 
+	// make sure we have an environment
+	if conf.Environment == nil {
+		conf.Environment = NewEnvironment()
+	}
+
 	// make sure we have an info struct
 	if info == nil {
 		info = new(Info)
@@ -192,7 +196,6 @@ func NewChecker(conf *Config, fset *token.FileSet, pkg *Package, info *Info) *Ch
 		version: version,
 		objMap:  make(map[Object]*declInfo),
 		impMap:  make(map[importKey]*Package),
-		typMap:  make(map[string]*Named),
 	}
 }
 
@@ -406,8 +409,8 @@ func (check *Checker) recordCommaOkTypes(x ast.Expr, a [2]Type) {
 func (check *Checker) recordInferred(call ast.Expr, targs []Type, sig *Signature) {
 	assert(call != nil)
 	assert(sig != nil)
-	if m := check.Info.Inferred; m != nil {
-		m[call] = Inferred{targs, sig}
+	if m := check.Inferred; m != nil {
+		m[call] = Inferred{NewTypeList(targs), sig}
 	}
 }
 

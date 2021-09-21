@@ -152,6 +152,7 @@ func TestValuesInfo(t *testing.T) {
 		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
 
 		{`package g0; const (a = len([iota]int{}); b; c); const _ = c`, `c`, `int`, `2`}, // issue #22341
+		{`package g1; var(j int32; s int; n = 1.0<<s == j)`, `1.0`, `int32`, `1`},        // issue #48422
 	}
 
 	for _, test := range tests {
@@ -362,6 +363,9 @@ func TestTypesInfo(t *testing.T) {
 
 		// issue 45096
 		{genericPkg + `issue45096; func _[T interface{ ~int8 | ~int16 | ~int32  }](x T) { _ = x < 0 }`, `0`, `generic_issue45096.T₁`},
+
+		// issue 47895
+		{`package p; import "unsafe"; type S struct { f int }; var s S; var _ = unsafe.Offsetof(s.f)`, `s.f`, `int`},
 	}
 
 	for _, test := range tests {
@@ -479,7 +483,7 @@ func TestInferredInfo(t *testing.T) {
 		}
 
 		// look for inferred type arguments and signature
-		var targs []Type
+		var targs *TypeList
 		var sig *Signature
 		for call, inf := range info.Inferred {
 			var fun ast.Expr
@@ -503,11 +507,12 @@ func TestInferredInfo(t *testing.T) {
 		}
 
 		// check that type arguments are correct
-		if len(targs) != len(test.targs) {
-			t.Errorf("package %s: got %d type arguments; want %d", name, len(targs), len(test.targs))
+		if targs.Len() != len(test.targs) {
+			t.Errorf("package %s: got %d type arguments; want %d", name, targs.Len(), len(test.targs))
 			continue
 		}
-		for i, targ := range targs {
+		for i := 0; i < targs.Len(); i++ {
+			targ := targs.At(i)
 			if got := targ.String(); got != test.targs[i] {
 				t.Errorf("package %s, %d. type argument: got %s; want %s", name, i, got, test.targs[i])
 				continue
@@ -1617,6 +1622,48 @@ func TestIdentical_issue15173(t *testing.T) {
 	}
 }
 
+func TestIdenticalUnions(t *testing.T) {
+	tname := NewTypeName(token.NoPos, nil, "myInt", nil)
+	myInt := NewNamed(tname, Typ[Int], nil)
+	tmap := map[string]*Term{
+		"int":     NewTerm(false, Typ[Int]),
+		"~int":    NewTerm(true, Typ[Int]),
+		"string":  NewTerm(false, Typ[String]),
+		"~string": NewTerm(true, Typ[String]),
+		"myInt":   NewTerm(false, myInt),
+	}
+	makeUnion := func(s string) *Union {
+		parts := strings.Split(s, "|")
+		var terms []*Term
+		for _, p := range parts {
+			term := tmap[p]
+			if term == nil {
+				t.Fatalf("missing term %q", p)
+			}
+			terms = append(terms, term)
+		}
+		return NewUnion(terms)
+	}
+	for _, test := range []struct {
+		x, y string
+		want bool
+	}{
+		// These tests are just sanity checks. The tests for type sets and
+		// interfaces provide much more test coverage.
+		{"int|~int", "~int", true},
+		{"myInt|~int", "~int", true},
+		{"int|string", "string|int", true},
+		{"int|int|string", "string|int", true},
+		{"myInt|string", "int|string", false},
+	} {
+		x := makeUnion(test.x)
+		y := makeUnion(test.y)
+		if got := Identical(x, y); got != test.want {
+			t.Errorf("Identical(%v, %v) = %t", test.x, test.y, got)
+		}
+	}
+}
+
 func TestIssue15305(t *testing.T) {
 	const src = "package p; func f() int16; var _ = f(undef)"
 	fset := token.NewFileSet()
@@ -1847,18 +1894,53 @@ func TestInstantiate(t *testing.T) {
 
 	// type T should have one type parameter
 	T := pkg.Scope().Lookup("T").Type().(*Named)
-	if n := T.TParams().Len(); n != 1 {
+	if n := T.TypeParams().Len(); n != 1 {
 		t.Fatalf("expected 1 type parameter; found %d", n)
 	}
 
 	// instantiation should succeed (no endless recursion)
 	// even with a nil *Checker
-	var check *Checker
-	res := check.Instantiate(token.NoPos, T, []Type{Typ[Int]}, nil, false)
+	res, err := Instantiate(nil, T, []Type{Typ[Int]}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// instantiated type should point to itself
 	if p := res.Underlying().(*Pointer).Elem(); p != res {
 		t.Fatalf("unexpected result type: %s points to %s", res, p)
+	}
+}
+
+func TestInstantiateErrors(t *testing.T) {
+	tests := []struct {
+		src    string // by convention, T must be the type being instantiated
+		targs  []Type
+		wantAt int // -1 indicates no error
+	}{
+		{"type T[P interface{~string}] int", []Type{Typ[Int]}, 0},
+		{"type T[P1 interface{int}, P2 interface{~string}] int", []Type{Typ[Int], Typ[Int]}, 1},
+		{"type T[P1 any, P2 interface{~[]P1}] int", []Type{Typ[Int], NewSlice(Typ[String])}, 1},
+		{"type T[P1 interface{~[]P2}, P2 any] int", []Type{NewSlice(Typ[String]), Typ[Int]}, 0},
+	}
+
+	for _, test := range tests {
+		src := genericPkg + "p; " + test.src
+		pkg, err := pkgFor(".", src, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		T := pkg.Scope().Lookup("T").Type().(*Named)
+
+		_, err = Instantiate(nil, T, test.targs, true)
+		if err == nil {
+			t.Fatalf("Instantiate(%v, %v) returned nil error, want non-nil", T, test.targs)
+		}
+
+		gotAt := err.(ArgumentError).Index()
+		if gotAt != test.wantAt {
+			t.Errorf("Instantate(%v, %v): error at index %d, want index %d", T, test.targs, gotAt, test.wantAt)
+		}
 	}
 }
 

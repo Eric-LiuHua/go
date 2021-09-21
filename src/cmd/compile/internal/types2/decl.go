@@ -66,6 +66,12 @@ func (check *Checker) objDecl(obj Object, def *Named) {
 		}()
 	}
 
+	// Funcs with m.instRecv set have not yet be completed. Complete them now
+	// so that they have a type when objDecl exits.
+	if m, _ := obj.(*Func); m != nil && m.instRecv != nil {
+		check.completeMethod(check.conf.Environment, m)
+	}
+
 	// Checking the declaration of obj means inferring its type
 	// (and possibly its value, for constants).
 	// An object's type (and thus the object) may be in one of
@@ -317,7 +323,7 @@ func (check *Checker) validType(typ Type, path []Object) typeInfo {
 		}
 
 	case *Named:
-		t.expand(check.typMap)
+		t.resolve(check.conf.Environment)
 
 		// don't touch the type if it is from a different package or the Universe scope
 		// (doing so would lead to a race condition - was issue #35049)
@@ -514,11 +520,26 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init syntax.Expr) {
 	check.initVars(lhs, []syntax.Expr{init}, nopos)
 }
 
+// isImportedConstraint reports whether typ is an imported type constraint.
+func (check *Checker) isImportedConstraint(typ Type) bool {
+	named, _ := typ.(*Named)
+	if named == nil || named.obj.pkg == check.pkg || named.obj.pkg == nil {
+		return false
+	}
+	u, _ := named.under().(*Interface)
+	return u != nil && u.IsConstraint()
+}
+
 func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named) {
 	assert(obj.typ == nil)
 
+	var rhs Type
 	check.later(func() {
 		check.validType(obj.typ, nil)
+		// If typ is local, an error was already reported where typ is specified/defined.
+		if check.isImportedConstraint(rhs) && !check.allowVersion(check.pkg, 1, 18) {
+			check.errorf(tdecl.Type.Pos(), "using type constraint %s requires go1.18 or later", rhs)
+		}
 	})
 
 	alias := tdecl.Alias
@@ -540,7 +561,8 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named
 		}
 
 		obj.typ = Typ[Invalid]
-		obj.typ = check.anyType(tdecl.Type)
+		rhs = check.varType(tdecl.Type)
+		obj.typ = rhs
 		return
 	}
 
@@ -551,12 +573,13 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named
 	if tdecl.TParamList != nil {
 		check.openScope(tdecl, "type parameters")
 		defer check.closeScope()
-		named.tparams = check.collectTypeParams(tdecl.TParamList)
+		check.collectTypeParams(&named.tparams, tdecl.TParamList)
 	}
 
 	// determine underlying type of named
-	named.fromRHS = check.definedType(tdecl.Type, named)
-	assert(named.fromRHS != nil)
+	rhs = check.definedType(tdecl.Type, named)
+	assert(rhs != nil)
+	named.fromRHS = rhs
 	// The underlying type of named may be itself a named type that is
 	// incomplete:
 	//
@@ -575,14 +598,14 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named
 	named.underlying = under(named)
 
 	// If the RHS is a type parameter, it must be from this type declaration.
-	if tpar, _ := named.underlying.(*TypeParam); tpar != nil && tparamIndex(named.TParams().list(), tpar) < 0 {
+	if tpar, _ := named.underlying.(*TypeParam); tpar != nil && tparamIndex(named.TypeParams().list(), tpar) < 0 {
 		check.errorf(tdecl.Type, "cannot use function type parameter %s as RHS in type declaration", tpar)
 		named.underlying = Typ[Invalid]
 	}
 }
 
-func (check *Checker) collectTypeParams(list []*syntax.Field) *TParamList {
-	tparams := make([]*TypeName, len(list))
+func (check *Checker) collectTypeParams(dst **TypeParamList, list []*syntax.Field) {
+	tparams := make([]*TypeParam, len(list))
 
 	// Declare type parameters up-front.
 	// The scope of type parameters starts at the beginning of the type parameter
@@ -591,44 +614,49 @@ func (check *Checker) collectTypeParams(list []*syntax.Field) *TParamList {
 		tparams[i] = check.declareTypeParam(f.Name)
 	}
 
+	// Set the type parameters before collecting the type constraints because
+	// the parameterized type may be used by the constraints (issue #47887).
+	// Example: type T[P T[P]] interface{}
+	*dst = bindTParams(tparams)
+
 	var bound Type
 	for i, f := range list {
 		// Optimization: Re-use the previous type bound if it hasn't changed.
 		// This also preserves the grouped output of type parameter lists
 		// when printing type strings.
 		if i == 0 || f.Type != list[i-1].Type {
-			bound = check.boundType(f.Type)
+			// The predeclared identifier "any" is visible only as a type bound in a type parameter list.
+			// If we allow "any" for general use, this if-statement can be removed (issue #33232).
+			if name, _ := unparen(f.Type).(*syntax.Name); name != nil && name.Value == "any" && check.lookup("any") == universeAny {
+				bound = universeAny.Type()
+			} else {
+				bound = check.typ(f.Type)
+			}
 		}
-		tparams[i].typ.(*TypeParam).bound = bound
+		tparams[i].bound = bound
 	}
 
-	return bindTParams(tparams)
-}
-
-func (check *Checker) declareTypeParam(name *syntax.Name) *TypeName {
-	tpar := NewTypeName(name.Pos(), check.pkg, name.Value, nil)
-	check.NewTypeParam(tpar, nil)                           // assigns type to tpar as a side-effect
-	check.declare(check.scope, name, tpar, check.scope.pos) // TODO(gri) check scope position
-	return tpar
-}
-
-// boundType type-checks the type expression e and returns its type, or Typ[Invalid].
-// The type must be an interface, including the predeclared type "any".
-func (check *Checker) boundType(e syntax.Expr) Type {
-	// The predeclared identifier "any" is visible only as a type bound in a type parameter list.
-	// If we allow "any" for general use, this if-statement can be removed (issue #33232).
-	if name, _ := unparen(e).(*syntax.Name); name != nil && name.Value == "any" && check.lookup("any") == universeAny {
-		return universeAny.Type()
-	}
-
-	bound := check.typ(e)
 	check.later(func() {
-		u := under(bound)
-		if _, ok := u.(*Interface); !ok && u != Typ[Invalid] {
-			check.errorf(e, "%s is not an interface", bound)
+		for i, tpar := range tparams {
+			u := under(tpar.bound)
+			if _, ok := u.(*Interface); !ok && u != Typ[Invalid] {
+				check.errorf(list[i].Type, "%s is not an interface", tpar.bound)
+			}
 		}
 	})
-	return bound
+}
+
+func (check *Checker) declareTypeParam(name *syntax.Name) *TypeParam {
+	// Use Typ[Invalid] for the type constraint to ensure that a type
+	// is present even if the actual constraint has not been assigned
+	// yet.
+	// TODO(gri) Need to systematically review all uses of type parameter
+	//           constraints to make sure we don't rely on them if they
+	//           are not properly set yet.
+	tname := NewTypeName(name.Pos(), check.pkg, name.Value, nil)
+	tpar := check.newTypeParam(tname, Typ[Invalid])          // assigns type to tname as a side-effect
+	check.declare(check.scope, name, tname, check.scope.pos) // TODO(gri) check scope position
+	return tpar
 }
 
 func (check *Checker) collectMethods(obj *TypeName) {
@@ -693,7 +721,7 @@ func (check *Checker) collectMethods(obj *TypeName) {
 		}
 
 		if base != nil {
-			base.load() // TODO(mdempsky): Probably unnecessary.
+			base.resolve(nil) // TODO(mdempsky): Probably unnecessary.
 			base.methods = append(base.methods, m)
 		}
 	}

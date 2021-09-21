@@ -1450,9 +1450,9 @@ func disallowInternal(ctx context.Context, srcDir string, importer *Package, imp
 			// The importer is a list of command-line files.
 			// Pretend that the import path is the import path of the
 			// directory containing them.
-			// If the directory is outside the main module, this will resolve to ".",
+			// If the directory is outside the main modules, this will resolve to ".",
 			// which is not a prefix of any valid module.
-			importerPath = modload.DirImportPath(ctx, importer.Dir)
+			importerPath, _ = modload.MainModules.DirImportPath(ctx, importer.Dir)
 		}
 		parentOfInternal := p.ImportPath[:i]
 		if str.HasPathPrefix(importerPath, parentOfInternal) {
@@ -2447,7 +2447,8 @@ func PackagesAndErrors(ctx context.Context, opts PackageOpts, patterns []string)
 		}
 		matches, _ = modload.LoadPackages(ctx, modOpts, patterns...)
 	} else {
-		matches = search.ImportPaths(patterns)
+		noModRoots := []string{}
+		matches = search.ImportPaths(patterns, noModRoots)
 	}
 
 	var (
@@ -2629,10 +2630,20 @@ func (e *mainPackageError) ImportPath() string {
 
 func setToolFlags(pkgs ...*Package) {
 	for _, p := range PackageList(pkgs) {
-		p.Internal.Asmflags = BuildAsmflags.For(p)
-		p.Internal.Gcflags = BuildGcflags.For(p)
-		p.Internal.Ldflags = BuildLdflags.For(p)
-		p.Internal.Gccgoflags = BuildGccgoflags.For(p)
+		appendFlags(p, &p.Internal.Asmflags, &BuildAsmflags)
+		appendFlags(p, &p.Internal.Gcflags, &BuildGcflags)
+		appendFlags(p, &p.Internal.Ldflags, &BuildLdflags)
+		appendFlags(p, &p.Internal.Gccgoflags, &BuildGccgoflags)
+	}
+}
+
+func appendFlags(p *Package, flags *[]string, packageFlag *PerPackageFlag) {
+	if !packageFlag.seenPackages[p] {
+		if packageFlag.seenPackages == nil {
+			packageFlag.seenPackages = make(map[*Package]bool)
+		}
+		packageFlag.seenPackages[p] = true
+		*flags = append(*flags, packageFlag.For(p)...)
 	}
 }
 
@@ -2673,10 +2684,7 @@ func GoFilesPackage(ctx context.Context, opts PackageOpts, gofiles []string) *Pa
 		if fi.IsDir() {
 			base.Fatalf("%s is a directory, should be a Go file", file)
 		}
-		dir1, _ := filepath.Split(file)
-		if dir1 == "" {
-			dir1 = "./"
-		}
+		dir1 := filepath.Dir(file)
 		if dir == "" {
 			dir = dir1
 		} else if dir != dir1 {

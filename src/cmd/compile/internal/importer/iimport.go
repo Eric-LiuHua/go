@@ -72,7 +72,7 @@ const (
 	structType
 	interfaceType
 	typeParamType
-	instType
+	instanceType
 	unionType
 )
 
@@ -257,7 +257,7 @@ func (p *iimporter) posBaseAt(off uint64) *syntax.PosBase {
 		return posBase
 	}
 	filename := p.stringAt(off)
-	posBase := syntax.NewFileBase(filename)
+	posBase := syntax.NewTrimmedFileBase(filename, true)
 	p.posBaseCache[off] = posBase
 	return posBase
 }
@@ -309,28 +309,26 @@ func (r *importReader) obj(name string) {
 		r.declare(types2.NewConst(pos, r.currPkg, name, typ, val))
 
 	case 'F', 'G':
-		var tparams []*types2.TypeName
+		var tparams []*types2.TypeParam
 		if tag == 'G' {
 			tparams = r.tparamList()
 		}
 		sig := r.signature(nil)
-		sig.SetTParams(tparams)
+		sig.SetTypeParams(tparams)
 		r.declare(types2.NewFunc(pos, r.currPkg, name, sig))
 
 	case 'T', 'U':
-		var tparams []*types2.TypeName
-		if tag == 'U' {
-			tparams = r.tparamList()
-		}
-
 		// Types can be recursive. We need to setup a stub
 		// declaration before recursing.
 		obj := types2.NewTypeName(pos, r.currPkg, name, nil)
 		named := types2.NewNamed(obj, nil, nil)
-		if tag == 'U' {
-			named.SetTParams(tparams)
-		}
+		// Declare obj before calling r.tparamList, so the new type name is recognized
+		// if used in the constraint of one of its own typeparams (see #48280).
 		r.declare(obj)
+		if tag == 'U' {
+			tparams := r.tparamList()
+			named.SetTypeParams(tparams)
+		}
 
 		underlying := r.p.typAt(r.uint64(), named).Underlying()
 		named.SetUnderlying(underlying)
@@ -345,13 +343,13 @@ func (r *importReader) obj(name string) {
 				// If the receiver has any targs, set those as the
 				// rparams of the method (since those are the
 				// typeparams being used in the method sig/body).
-				targs := baseType(msig.Recv().Type()).TArgs()
-				if len(targs) > 0 {
-					rparams := make([]*types2.TypeName, len(targs))
-					for i, targ := range targs {
-						rparams[i] = types2.AsTypeParam(targ).Obj()
+				targs := baseType(msig.Recv().Type()).TypeArgs()
+				if targs.Len() > 0 {
+					rparams := make([]*types2.TypeParam, targs.Len())
+					for i := range rparams {
+						rparams[i] = types2.AsTypeParam(targs.At(i))
 					}
-					msig.SetRParams(rparams)
+					msig.SetRecvTypeParams(rparams)
 				}
 
 				named.AddMethod(types2.NewFunc(mpos, r.currPkg, mname, msig))
@@ -367,7 +365,7 @@ func (r *importReader) obj(name string) {
 		}
 		name0, sub := parseSubscript(name)
 		tn := types2.NewTypeName(pos, r.currPkg, name0, nil)
-		t := (*types2.Checker)(nil).NewTypeParam(tn, nil)
+		t := types2.NewTypeParam(tn, nil)
 		if sub == 0 {
 			errorf("missing subscript")
 		}
@@ -648,11 +646,13 @@ func (r *importReader) doType(base *types2.Named) types2.Type {
 		r.p.doDecl(pkg, name)
 		return r.p.tparamIndex[id]
 
-	case instType:
+	case instanceType:
 		if r.p.exportVersion < iexportVersionGenerics {
 			errorf("unexpected instantiation type")
 		}
-		pos := r.pos()
+		// pos does not matter for instances: they are positioned on the original
+		// type.
+		_ = r.pos()
 		len := r.uint64()
 		targs := make([]types2.Type, len)
 		for i := range targs {
@@ -661,8 +661,8 @@ func (r *importReader) doType(base *types2.Named) types2.Type {
 		baseType := r.typ()
 		// The imported instantiated type doesn't include any methods, so
 		// we must always use the methods of the base (orig) type.
-		var check *types2.Checker // TODO provide a non-nil *Checker
-		t := check.Instantiate(pos, baseType, targs, nil, false)
+		// TODO provide a non-nil *Environment
+		t, _ := types2.Instantiate(nil, baseType, targs, false)
 		return t
 
 	case unionType:
@@ -688,15 +688,15 @@ func (r *importReader) signature(recv *types2.Var) *types2.Signature {
 	return types2.NewSignature(recv, params, results, variadic)
 }
 
-func (r *importReader) tparamList() []*types2.TypeName {
+func (r *importReader) tparamList() []*types2.TypeParam {
 	n := r.uint64()
 	if n == 0 {
 		return nil
 	}
-	xs := make([]*types2.TypeName, n)
+	xs := make([]*types2.TypeParam, n)
 	for i := range xs {
 		typ := r.typ()
-		xs[i] = types2.AsTypeParam(typ).Obj()
+		xs[i] = types2.AsTypeParam(typ)
 	}
 	return xs
 }

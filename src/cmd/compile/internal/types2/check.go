@@ -86,7 +86,6 @@ type Checker struct {
 	nextID  uint64                 // unique Id for type parameters (first valid Id is 1)
 	objMap  map[Object]*declInfo   // maps package-level objects and (non-interface) methods to declaration info
 	impMap  map[importKey]*Package // maps (import path, source directory) to (complete or fake) package
-	typMap  map[string]*Named      // maps an instantiated named type hash to a *Named type
 
 	// pkgPathMap maps package names to the set of distinct import paths we've
 	// seen for that name, anywhere in the import graph. It is used for
@@ -171,6 +170,11 @@ func NewChecker(conf *Config, pkg *Package, info *Info) *Checker {
 		conf = new(Config)
 	}
 
+	// make sure we have an environment
+	if conf.Environment == nil {
+		conf.Environment = NewEnvironment()
+	}
+
 	// make sure we have an info struct
 	if info == nil {
 		info = new(Info)
@@ -188,7 +192,6 @@ func NewChecker(conf *Config, pkg *Package, info *Info) *Checker {
 		version: version,
 		objMap:  make(map[Object]*declInfo),
 		impMap:  make(map[importKey]*Package),
-		typMap:  make(map[string]*Named),
 	}
 }
 
@@ -416,7 +419,7 @@ func (check *Checker) recordInferred(call syntax.Expr, targs []Type, sig *Signat
 	assert(call != nil)
 	assert(sig != nil)
 	if m := check.Inferred; m != nil {
-		m[call] = Inferred{targs, sig}
+		m[call] = Inferred{NewTypeList(targs), sig}
 	}
 }
 

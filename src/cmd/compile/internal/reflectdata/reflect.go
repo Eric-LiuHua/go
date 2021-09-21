@@ -7,7 +7,6 @@ package reflectdata
 import (
 	"encoding/binary"
 	"fmt"
-	"internal/buildcfg"
 	"os"
 	"sort"
 	"strings"
@@ -39,9 +38,12 @@ func CountPTabs() int {
 
 // runtime interface and reflection data structures
 var (
-	signatmu    sync.Mutex // protects signatset and signatslice
-	signatset   = make(map[*types.Type]struct{})
-	signatslice []*types.Type
+	// protects signatset and signatslice
+	signatmu sync.Mutex
+	// Tracking which types need runtime type descriptor
+	signatset = make(map[*types.Type]struct{})
+	// Queue of types wait to be generated runtime type descriptor
+	signatslice []typeAndStr
 
 	gcsymmu  sync.Mutex // protects gcsymset and gcsymslice
 	gcsymset = make(map[*types.Type]struct{})
@@ -94,10 +96,10 @@ func MapBucketType(t *types.Type) *types.Type {
 	elemtype := t.Elem()
 	types.CalcSize(keytype)
 	types.CalcSize(elemtype)
-	if keytype.Width > MAXKEYSIZE {
+	if keytype.Size() > MAXKEYSIZE {
 		keytype = types.NewPtr(keytype)
 	}
-	if elemtype.Width > MAXELEMSIZE {
+	if elemtype.Size() > MAXELEMSIZE {
 		elemtype = types.NewPtr(elemtype)
 	}
 
@@ -142,46 +144,46 @@ func MapBucketType(t *types.Type) *types.Type {
 	if BUCKETSIZE < 8 {
 		base.Fatalf("bucket size too small for proper alignment")
 	}
-	if keytype.Align > BUCKETSIZE {
+	if uint8(keytype.Alignment()) > BUCKETSIZE {
 		base.Fatalf("key align too big for %v", t)
 	}
-	if elemtype.Align > BUCKETSIZE {
+	if uint8(elemtype.Alignment()) > BUCKETSIZE {
 		base.Fatalf("elem align too big for %v", t)
 	}
-	if keytype.Width > MAXKEYSIZE {
+	if keytype.Size() > MAXKEYSIZE {
 		base.Fatalf("key size to large for %v", t)
 	}
-	if elemtype.Width > MAXELEMSIZE {
+	if elemtype.Size() > MAXELEMSIZE {
 		base.Fatalf("elem size to large for %v", t)
 	}
-	if t.Key().Width > MAXKEYSIZE && !keytype.IsPtr() {
+	if t.Key().Size() > MAXKEYSIZE && !keytype.IsPtr() {
 		base.Fatalf("key indirect incorrect for %v", t)
 	}
-	if t.Elem().Width > MAXELEMSIZE && !elemtype.IsPtr() {
+	if t.Elem().Size() > MAXELEMSIZE && !elemtype.IsPtr() {
 		base.Fatalf("elem indirect incorrect for %v", t)
 	}
-	if keytype.Width%int64(keytype.Align) != 0 {
+	if keytype.Size()%keytype.Alignment() != 0 {
 		base.Fatalf("key size not a multiple of key align for %v", t)
 	}
-	if elemtype.Width%int64(elemtype.Align) != 0 {
+	if elemtype.Size()%elemtype.Alignment() != 0 {
 		base.Fatalf("elem size not a multiple of elem align for %v", t)
 	}
-	if bucket.Align%keytype.Align != 0 {
+	if uint8(bucket.Alignment())%uint8(keytype.Alignment()) != 0 {
 		base.Fatalf("bucket align not multiple of key align %v", t)
 	}
-	if bucket.Align%elemtype.Align != 0 {
+	if uint8(bucket.Alignment())%uint8(elemtype.Alignment()) != 0 {
 		base.Fatalf("bucket align not multiple of elem align %v", t)
 	}
-	if keys.Offset%int64(keytype.Align) != 0 {
+	if keys.Offset%keytype.Alignment() != 0 {
 		base.Fatalf("bad alignment of keys in bmap for %v", t)
 	}
-	if elems.Offset%int64(elemtype.Align) != 0 {
+	if elems.Offset%elemtype.Alignment() != 0 {
 		base.Fatalf("bad alignment of elems in bmap for %v", t)
 	}
 
 	// Double-check that overflow field is final memory in struct,
 	// with no padding at end.
-	if overflow.Offset != bucket.Width-int64(types.PtrSize) {
+	if overflow.Offset != bucket.Size()-int64(types.PtrSize) {
 		base.Fatalf("bad offset of overflow in bmap for %v", t)
 	}
 
@@ -231,8 +233,8 @@ func MapType(t *types.Type) *types.Type {
 
 	// The size of hmap should be 48 bytes on 64 bit
 	// and 28 bytes on 32 bit platforms.
-	if size := int64(8 + 5*types.PtrSize); hmap.Width != size {
-		base.Fatalf("hmap size not correct: got %d, want %d", hmap.Width, size)
+	if size := int64(8 + 5*types.PtrSize); hmap.Size() != size {
+		base.Fatalf("hmap size not correct: got %d, want %d", hmap.Size(), size)
 	}
 
 	t.MapType().Hmap = hmap
@@ -291,8 +293,8 @@ func MapIterType(t *types.Type) *types.Type {
 	hiter := types.NewStruct(types.NoPkg, fields)
 	hiter.SetNoalg(true)
 	types.CalcSize(hiter)
-	if hiter.Width != int64(12*types.PtrSize) {
-		base.Fatalf("hash_iter size not correct %d %d", hiter.Width, 12*types.PtrSize)
+	if hiter.Size() != int64(12*types.PtrSize) {
+		base.Fatalf("hash_iter size not correct %d %d", hiter.Size(), 12*types.PtrSize)
 	}
 	t.MapType().Hiter = hiter
 	hiter.StructType().Map = t
@@ -705,7 +707,7 @@ func dcommontype(lsym *obj.LSym, t *types.Type) int {
 	//		ptrToThis     typeOff
 	//	}
 	ot := 0
-	ot = objw.Uintptr(lsym, ot, uint64(t.Width))
+	ot = objw.Uintptr(lsym, ot, uint64(t.Size()))
 	ot = objw.Uintptr(lsym, ot, uint64(ptrdata))
 	ot = objw.Uint32(lsym, ot, types.TypeHash(t))
 
@@ -742,16 +744,16 @@ func dcommontype(lsym *obj.LSym, t *types.Type) int {
 	ot = objw.Uint8(lsym, ot, tflag)
 
 	// runtime (and common sense) expects alignment to be a power of two.
-	i := int(t.Align)
+	i := int(uint8(t.Alignment()))
 
 	if i == 0 {
 		i = 1
 	}
 	if i&(i-1) != 0 {
-		base.Fatalf("invalid alignment %d for %v", t.Align, t)
+		base.Fatalf("invalid alignment %d for %v", uint8(t.Alignment()), t)
 	}
-	ot = objw.Uint8(lsym, ot, t.Align) // align
-	ot = objw.Uint8(lsym, ot, t.Align) // fieldAlign
+	ot = objw.Uint8(lsym, ot, uint8(t.Alignment())) // align
+	ot = objw.Uint8(lsym, ot, uint8(t.Alignment())) // fieldAlign
 
 	i = kinds[t.Kind()]
 	if types.IsDirectIface(t) {
@@ -924,7 +926,7 @@ func formalType(t *types.Type) *types.Type {
 
 func writeType(t *types.Type) *obj.LSym {
 	t = formalType(t)
-	if t.IsUntyped() {
+	if t.IsUntyped() || t.HasTParam() {
 		base.Fatalf("writeType %v", t)
 	}
 
@@ -1087,20 +1089,20 @@ func writeType(t *types.Type) *obj.LSym {
 		var flags uint32
 		// Note: flags must match maptype accessors in ../../../../runtime/type.go
 		// and maptype builder in ../../../../reflect/type.go:MapOf.
-		if t.Key().Width > MAXKEYSIZE {
+		if t.Key().Size() > MAXKEYSIZE {
 			ot = objw.Uint8(lsym, ot, uint8(types.PtrSize))
 			flags |= 1 // indirect key
 		} else {
-			ot = objw.Uint8(lsym, ot, uint8(t.Key().Width))
+			ot = objw.Uint8(lsym, ot, uint8(t.Key().Size()))
 		}
 
-		if t.Elem().Width > MAXELEMSIZE {
+		if t.Elem().Size() > MAXELEMSIZE {
 			ot = objw.Uint8(lsym, ot, uint8(types.PtrSize))
 			flags |= 2 // indirect value
 		} else {
-			ot = objw.Uint8(lsym, ot, uint8(t.Elem().Width))
+			ot = objw.Uint8(lsym, ot, uint8(t.Elem().Size()))
 		}
-		ot = objw.Uint16(lsym, ot, uint16(MapBucketType(t).Width))
+		ot = objw.Uint16(lsym, ot, uint16(MapBucketType(t).Size()))
 		if types.IsReflexive(t.Key()) {
 			flags |= 4 // reflexive key
 		}
@@ -1235,22 +1237,16 @@ func NeedRuntimeType(t *types.Type) {
 	}
 	if _, ok := signatset[t]; !ok {
 		signatset[t] = struct{}{}
-		signatslice = append(signatslice, t)
+		signatslice = append(signatslice, typeAndStr{t: t, short: types.TypeSymName(t), regular: t.String()})
 	}
 }
 
 func WriteRuntimeTypes() {
-	// Process signatset. Use a loop, as writeType adds
-	// entries to signatset while it is being processed.
-	signats := make([]typeAndStr, len(signatslice))
+	// Process signatslice. Use a loop, as writeType adds
+	// entries to signatslice while it is being processed.
 	for len(signatslice) > 0 {
-		signats = signats[:0]
-		// Transfer entries to a slice and sort, for reproducible builds.
-		for _, t := range signatslice {
-			signats = append(signats, typeAndStr{t: t, short: types.TypeSymName(t), regular: t.String()})
-			delete(signatset, t)
-		}
-		signatslice = signatslice[:0]
+		signats := signatslice
+		// Sort for reproducible builds.
 		sort.Sort(typesByString(signats))
 		for _, ts := range signats {
 			t := ts.t
@@ -1259,6 +1255,7 @@ func WriteRuntimeTypes() {
 				writeType(types.NewPtr(t))
 			}
 		}
+		signatslice = signatslice[len(signats):]
 	}
 
 	// Emit GC data symbols.
@@ -1559,7 +1556,7 @@ func fillptrmask(t *types.Type, ptrmask []byte) {
 // For non-trivial arrays, the program describes the full t.Width size.
 func dgcprog(t *types.Type, write bool) (*obj.LSym, int64) {
 	types.CalcSize(t)
-	if t.Width == types.BADWIDTH {
+	if t.Size() == types.BADWIDTH {
 		base.Fatalf("dgcprog: %v badwidth", t)
 	}
 	lsym := TypeLinksymPrefix(".gcprog", t)
@@ -1568,8 +1565,8 @@ func dgcprog(t *types.Type, write bool) (*obj.LSym, int64) {
 	p.emit(t, 0)
 	offset := p.w.BitIndex() * int64(types.PtrSize)
 	p.end()
-	if ptrdata := types.PtrDataSize(t); offset < ptrdata || offset > t.Width {
-		base.Fatalf("dgcprog: %v: offset=%d but ptrdata=%d size=%d", t, offset, ptrdata, t.Width)
+	if ptrdata := types.PtrDataSize(t); offset < ptrdata || offset > t.Size() {
+		base.Fatalf("dgcprog: %v: offset=%d but ptrdata=%d size=%d", t, offset, ptrdata, t.Size())
 	}
 	return lsym, offset
 }
@@ -1618,7 +1615,7 @@ func (p *gcProg) emit(t *types.Type, offset int64) {
 	if !t.HasPointers() {
 		return
 	}
-	if t.Width == int64(types.PtrSize) {
+	if t.Size() == int64(types.PtrSize) {
 		p.w.Ptr(offset / int64(types.PtrSize))
 		return
 	}
@@ -1650,16 +1647,16 @@ func (p *gcProg) emit(t *types.Type, offset int64) {
 			elem = elem.Elem()
 		}
 
-		if !p.w.ShouldRepeat(elem.Width/int64(types.PtrSize), count) {
+		if !p.w.ShouldRepeat(elem.Size()/int64(types.PtrSize), count) {
 			// Cheaper to just emit the bits.
 			for i := int64(0); i < count; i++ {
-				p.emit(elem, offset+i*elem.Width)
+				p.emit(elem, offset+i*elem.Size())
 			}
 			return
 		}
 		p.emit(elem, offset)
-		p.w.ZeroUntil((offset + elem.Width) / int64(types.PtrSize))
-		p.w.Repeat(elem.Width/int64(types.PtrSize), count-1)
+		p.w.ZeroUntil((offset + elem.Size()) / int64(types.PtrSize))
+		p.w.Repeat(elem.Size()/int64(types.PtrSize), count-1)
 
 	case types.TSTRUCT:
 		for _, t1 := range t.Fields().Slice() {
@@ -1728,7 +1725,7 @@ func NeedEmit(typ *types.Type) bool {
 		// Local defined type; our responsibility.
 		return true
 
-	case base.Ctxt.Pkgpath == "runtime" && (sym.Pkg == types.BuiltinPkg || sym.Pkg == ir.Pkgs.Unsafe):
+	case base.Ctxt.Pkgpath == "runtime" && (sym.Pkg == types.BuiltinPkg || sym.Pkg == types.UnsafePkg):
 		// Package runtime is responsible for including code for builtin
 		// types (predeclared and package unsafe).
 		return true
@@ -1871,15 +1868,11 @@ func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSy
 	// Disable tailcall for RegabiArgs for now. The IR does not connect the
 	// arguments with the OTAILCALL node, and the arguments are not marshaled
 	// correctly.
-	if !base.Flag.Cfg.Instrumenting && rcvr.IsPtr() && methodrcvr.IsPtr() && method.Embedded != 0 && !types.IsInterfaceMethod(method.Type) && !(base.Ctxt.Arch.Name == "ppc64le" && base.Ctxt.Flag_dynlink) && !buildcfg.Experiment.RegabiArgs && !generic {
-		// generate tail call: adjust pointer receiver and jump to embedded method.
-		left := dot.X // skip final .M
-		if !left.Type().IsPtr() {
-			left = typecheck.NodAddr(left)
-		}
-		as := ir.NewAssignStmt(base.Pos, nthis, typecheck.ConvNop(left, rcvr))
-		fn.Body.Append(as)
-		fn.Body.Append(ir.NewTailCallStmt(base.Pos, method.Nname.(*ir.Name)))
+	if !base.Flag.Cfg.Instrumenting && rcvr.IsPtr() && methodrcvr.IsPtr() && method.Embedded != 0 && !types.IsInterfaceMethod(method.Type) && !(base.Ctxt.Arch.Name == "ppc64le" && base.Ctxt.Flag_dynlink) && !generic {
+		call := ir.NewCallExpr(base.Pos, ir.OCALL, dot, nil)
+		call.Args = ir.ParamNames(tfn.Type())
+		call.IsDDD = tfn.Type().IsVariadic()
+		fn.Body.Append(ir.NewTailCallStmt(base.Pos, call))
 	} else {
 		fn.SetWrapper(true) // ignore frame for panic+recover matching
 		var call *ir.CallExpr
@@ -1898,10 +1891,6 @@ func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSy
 				targs = rcvr.Elem().RParams()
 			} else {
 				targs = rcvr.RParams()
-			}
-			if strings.HasPrefix(ir.MethodSym(orig, method.Sym).Name, ".inst.") {
-				fmt.Printf("%s\n", ir.MethodSym(orig, method.Sym).Name)
-				panic("multiple .inst.")
 			}
 			// The wrapper for an auto-generated pointer/non-pointer
 			// receiver method should share the same dictionary as the
@@ -1927,11 +1916,11 @@ func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSy
 			// Target method uses shaped names.
 			targs2 := make([]*types.Type, len(targs))
 			for i, t := range targs {
-				targs2[i] = typecheck.Shapify(t)
+				targs2[i] = typecheck.Shapify(t, i)
 			}
 			targs = targs2
 
-			sym := typecheck.MakeInstName(ir.MethodSym(methodrcvr, method.Sym), targs, true)
+			sym := typecheck.MakeFuncInstSym(ir.MethodSym(methodrcvr, method.Sym), targs, true)
 			if sym.Def == nil {
 				// Currently we make sure that we have all the instantiations
 				// we need by generating them all in ../noder/stencil.go:instantiateMethods
@@ -2042,19 +2031,24 @@ func getDictionary(gf *types.Sym, targs []*types.Type) ir.Node {
 		}
 	}
 
-	sym := typecheck.MakeDictName(gf, targs, true)
+	sym := typecheck.MakeDictSym(gf, targs, true)
 
 	// Initialize the dictionary, if we haven't yet already.
 	if lsym := sym.Linksym(); len(lsym.P) == 0 {
 		base.Fatalf("Dictionary should have already been generated: %s.%s", sym.Pkg.Path, sym.Name)
 	}
 
-	// Make a node referencing the dictionary symbol.
-	n := typecheck.NewName(sym)
-	n.SetType(types.Types[types.TUINTPTR]) // should probably be [...]uintptr, but doesn't really matter
-	n.SetTypecheck(1)
-	n.Class = ir.PEXTERN
-	sym.Def = n
+	// Make (or reuse) a node referencing the dictionary symbol.
+	var n *ir.Name
+	if sym.Def != nil {
+		n = sym.Def.(*ir.Name)
+	} else {
+		n = typecheck.NewName(sym)
+		n.SetType(types.Types[types.TUINTPTR]) // should probably be [...]uintptr, but doesn't really matter
+		n.SetTypecheck(1)
+		n.Class = ir.PEXTERN
+		sym.Def = n
+	}
 
 	// Return the address of the dictionary.
 	np := typecheck.NodAddr(n)

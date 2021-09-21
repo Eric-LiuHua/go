@@ -55,6 +55,18 @@ func (err Error) FullError() string {
 	return fmt.Sprintf("%s: %s", err.Pos, err.Full)
 }
 
+// An ArgumentError holds an error that is associated with an argument.
+type ArgumentError struct {
+	index int
+	error
+}
+
+// Index returns the positional index of the argument associated with the
+// error.
+func (e ArgumentError) Index() int {
+	return e.index
+}
+
 // An Importer resolves import paths to Packages.
 //
 // CAUTION: This interface does not support the import of locally
@@ -96,6 +108,11 @@ type ImporterFrom interface {
 // A Config specifies the configuration for type checking.
 // The zero value for Config is a ready-to-use default configuration.
 type Config struct {
+	// Environment is the environment used for resolving global
+	// identifiers. If nil, the type checker will initialize this
+	// field with a newly created environment.
+	Environment *Environment
+
 	// GoVersion describes the accepted Go language version. The string
 	// must follow the format "go%d.%d" (e.g. "go1.12") or ist must be
 	// empty; an empty string indicates the latest language version.
@@ -361,7 +378,7 @@ func (tv TypeAndValue) HasOk() bool {
 // Inferred reports the inferred type arguments and signature
 // for a parameterized function call that uses type inference.
 type Inferred struct {
-	TArgs []Type
+	TArgs *TypeList
 	Sig   *Signature
 }
 

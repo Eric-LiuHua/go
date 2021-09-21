@@ -32,6 +32,10 @@ import (
 	"unicode"
 )
 
+// CompilerDefaultGLevel is the -G level used by default when not overridden by a
+// command-line flag
+const CompilerDefaultGLevel = 3
+
 var (
 	verbose        = flag.Bool("v", false, "verbose. if set, parallelism is set to 1.")
 	keep           = flag.Bool("k", false, "keep. keep temporary directory.")
@@ -81,12 +85,12 @@ var unifiedEnabled, defaultGLevels = func() (bool, string) {
 	// won't need to disable tests for it anymore anyway.
 	enabled := strings.Contains(","+env.GOEXPERIMENT+",", ",unified,")
 
-	// Normal test runs should test with both -G=0 and -G=3 for types2
-	// coverage. But the unified experiment always uses types2, so
-	// testing with -G=3 is redundant.
-	glevels := "0,3"
-	if enabled {
-		glevels = "0"
+	// Test both -G=0 and -G=3 on the longtest builders, to make sure we
+	// don't accidentally break -G=0 mode until we're ready to remove it
+	// completely. But elsewhere, testing -G=3 alone should be enough.
+	glevels := "3"
+	if strings.Contains(os.Getenv("GO_BUILDER_NAME"), "longtest") {
+		glevels = "0,3"
 	}
 
 	return enabled, glevels
@@ -340,10 +344,15 @@ type test struct {
 }
 
 // initExpectFail initializes t.expectFail based on the build+test
-// configuration. It should only be called for tests known to use
-// types2.
-func (t *test) initExpectFail() {
+// configuration.
+func (t *test) initExpectFail(hasGFlag bool) {
 	if *force {
+		return
+	}
+
+	if t.glevel == 0 && !hasGFlag && !unifiedEnabled {
+		// tests should always pass when run w/o types2 (i.e., using the
+		// legacy typechecker, option -G=0).
 		return
 	}
 
@@ -581,14 +590,14 @@ func init() { checkShouldTest() }
 // over and over.
 func (t *test) goGcflags() string {
 	flags := os.Getenv("GO_GCFLAGS")
-	if t.glevel != 0 {
+	if t.glevel != CompilerDefaultGLevel {
 		flags = fmt.Sprintf("%s -G=%v", flags, t.glevel)
 	}
 	return "-gcflags=all=" + flags
 }
 
 func (t *test) goGcflagsIsEmpty() bool {
-	return "" == os.Getenv("GO_GCFLAGS") && t.glevel == 0
+	return "" == os.Getenv("GO_GCFLAGS") && t.glevel == CompilerDefaultGLevel
 }
 
 var errTimeout = errors.New("command exceeded time limit")
@@ -750,7 +759,8 @@ func (t *test) run() {
 			}
 		}
 
-		if hasGFlag && t.glevel != 0 {
+		// In unified IR mode, run the test regardless of explicit -G flag.
+		if !unifiedEnabled && hasGFlag && t.glevel != CompilerDefaultGLevel {
 			// test provides explicit -G flag already; don't run again
 			if *verbose {
 				fmt.Printf("excl\t%s\n", t.goFileName())
@@ -758,13 +768,7 @@ func (t *test) run() {
 			return false
 		}
 
-		if t.glevel == 0 && !hasGFlag && !unifiedEnabled {
-			// tests should always pass when run w/o types2 (i.e., using the
-			// legacy typechecker).
-			return true
-		}
-
-		t.initExpectFail()
+		t.initExpectFail(hasGFlag)
 
 		switch tool {
 		case Build, Run:
@@ -776,11 +780,13 @@ func (t *test) run() {
 			}
 
 		default:
-			// we don't know how to add -G for this test yet
-			if *verbose {
-				fmt.Printf("excl\t%s\n", t.goFileName())
+			if t.glevel != CompilerDefaultGLevel {
+				// we don't know how to add -G for this test yet
+				if *verbose {
+					fmt.Printf("excl\t%s\n", t.goFileName())
+				}
+				return false
 			}
-			return false
 		}
 
 		return true
@@ -1747,7 +1753,7 @@ var (
 	// are the supported variants.
 	archVariants = map[string][]string{
 		"386":     {"GO386", "sse2", "softfloat"},
-		"amd64":   {},
+		"amd64":   {"GOAMD64", "v1", "v2", "v3", "v4"},
 		"arm":     {"GOARM", "5", "6", "7"},
 		"arm64":   {},
 		"mips":    {"GOMIPS", "hardfloat", "softfloat"},
@@ -2178,14 +2184,7 @@ var types2Failures32Bit = setOf(
 )
 
 var g3Failures = setOf(
-	"writebarrier.go", // correct diagnostics, but different lines (probably irgen's fault)
-
-	"fixedbugs/issue30862.go", // -G=3 doesn't handle //go:nointerface
-
 	"typeparam/nested.go", // -G=3 doesn't support function-local types with generics
-
-	"typeparam/mdempsky/4.go",  // -G=3 can't export functions with labeled breaks in loops
-	"typeparam/mdempsky/15.go", // ICE in (*irgen).buildClosure
 )
 
 var unifiedFailures = setOf(

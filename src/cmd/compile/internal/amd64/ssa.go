@@ -822,7 +822,12 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		ssagen.AddAux2(&p.To, v, sc.Off64())
-	case ssa.OpAMD64MOVOstorezero:
+	case ssa.OpAMD64MOVOstoreconst:
+		sc := v.AuxValAndOff()
+		if sc.Val() != 0 {
+			v.Fatalf("MOVO for non zero constants not implemented: %s", v.LongString())
+		}
+
 		if s.ABI != obj.ABIInternal {
 			// zero X15 manually
 			opregreg(s, x86.AXORPS, x86.REG_X15, x86.REG_X15)
@@ -832,7 +837,8 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.From.Reg = x86.REG_X15
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
-		ssagen.AddAux(&p.To, v)
+		ssagen.AddAux2(&p.To, v, sc.Off64())
+
 	case ssa.OpAMD64MOVQstoreconstidx1, ssa.OpAMD64MOVQstoreconstidx8, ssa.OpAMD64MOVLstoreconstidx1, ssa.OpAMD64MOVLstoreconstidx4, ssa.OpAMD64MOVWstoreconstidx1, ssa.OpAMD64MOVWstoreconstidx2, ssa.OpAMD64MOVBstoreconstidx1,
 		ssa.OpAMD64ADDLconstmodifyidx1, ssa.OpAMD64ADDLconstmodifyidx4, ssa.OpAMD64ADDLconstmodifyidx8, ssa.OpAMD64ADDQconstmodifyidx1, ssa.OpAMD64ADDQconstmodifyidx8,
 		ssa.OpAMD64ANDLconstmodifyidx1, ssa.OpAMD64ANDLconstmodifyidx4, ssa.OpAMD64ANDLconstmodifyidx8, ssa.OpAMD64ANDQconstmodifyidx1, ssa.OpAMD64ANDQconstmodifyidx8,
@@ -1002,7 +1008,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		}
 		r := v.Reg()
 		getgFromTLS(s, r)
-	case ssa.OpAMD64CALLstatic:
+	case ssa.OpAMD64CALLstatic, ssa.OpAMD64CALLtail:
 		if s.ABI == obj.ABI0 && v.Aux.(*ssa.AuxCall).Fn.ABI() == obj.ABIInternal {
 			// zeroing X15 when entering ABIInternal from ABI0
 			if buildcfg.GOOS != "plan9" { // do not use SSE on Plan 9
@@ -1010,6 +1016,10 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 			}
 			// set G register from TLS
 			getgFromTLS(s, x86.REG_R14)
+		}
+		if v.Op == ssa.OpAMD64CALLtail {
+			s.TailCall(v)
+			break
 		}
 		s.Call(v)
 		if s.ABI == obj.ABIInternal && v.Aux.(*ssa.AuxCall).Fn.ABI() == obj.ABI0 {
@@ -1225,6 +1235,10 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		ssagen.AddAux(&p.To, v)
+	case ssa.OpAMD64PrefetchT0, ssa.OpAMD64PrefetchNTA:
+		p := s.Prog(v.Op.Asm())
+		p.From.Type = obj.TYPE_MEM
+		p.From.Reg = v.Args[0].Reg()
 	case ssa.OpClobber:
 		p := s.Prog(x86.AMOVL)
 		p.From.Type = obj.TYPE_CONST
@@ -1304,22 +1318,9 @@ func ssaGenBlock(s *ssagen.State, b, next *ssa.Block) {
 			p.To.Type = obj.TYPE_BRANCH
 			s.Branches = append(s.Branches, ssagen.Branch{P: p, B: b.Succs[0].Block()})
 		}
-	case ssa.BlockExit:
+	case ssa.BlockExit, ssa.BlockRetJmp:
 	case ssa.BlockRet:
 		s.Prog(obj.ARET)
-	case ssa.BlockRetJmp:
-		if s.ABI == obj.ABI0 && b.Aux.(*obj.LSym).ABI() == obj.ABIInternal {
-			// zeroing X15 when entering ABIInternal from ABI0
-			if buildcfg.GOOS != "plan9" { // do not use SSE on Plan 9
-				opregreg(s, x86.AXORPS, x86.REG_X15, x86.REG_X15)
-			}
-			// set G register from TLS
-			getgFromTLS(s, x86.REG_R14)
-		}
-		p := s.Prog(obj.ARET)
-		p.To.Type = obj.TYPE_MEM
-		p.To.Name = obj.NAME_EXTERN
-		p.To.Sym = b.Aux.(*obj.LSym)
 
 	case ssa.BlockAMD64EQF:
 		s.CombJump(b, next, &eqfJumps)

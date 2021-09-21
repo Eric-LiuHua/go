@@ -73,6 +73,7 @@ func abs(x, y float64) {
 	// s390x:"LPDFR\t",-"MOVD\t"     (no integer load/store)
 	// ppc64:"FABS\t"
 	// ppc64le:"FABS\t"
+	// riscv64:"FABSD\t"
 	// wasm:"F64Abs"
 	// arm/6:"ABSD\t"
 	sink64[0] = math.Abs(x)
@@ -96,6 +97,7 @@ func copysign(a, b, c float64) {
 	// s390x:"CPSDR",-"MOVD"         (no integer load/store)
 	// ppc64:"FCPSGN"
 	// ppc64le:"FCPSGN"
+	// riscv64:"FSGNJD"
 	// wasm:"F64Copysign"
 	sink64[0] = math.Copysign(a, b)
 
@@ -103,6 +105,7 @@ func copysign(a, b, c float64) {
 	// s390x:"LNDFR\t",-"MOVD\t"     (no integer load/store)
 	// ppc64:"FCPSGN"
 	// ppc64le:"FCPSGN"
+	// riscv64:"FSGNJD"
 	// arm64:"ORR", -"AND"
 	sink64[1] = math.Copysign(c, -1)
 
@@ -115,6 +118,7 @@ func copysign(a, b, c float64) {
 	// s390x:"CPSDR\t",-"MOVD\t"     (no integer load/store)
 	// ppc64:"FCPSGN"
 	// ppc64le:"FCPSGN"
+	// riscv64:"FSGNJD"
 	sink64[3] = math.Copysign(-1, c)
 }
 
@@ -125,7 +129,23 @@ func fma(x, y, z float64) float64 {
 	// s390x:"FMADD"
 	// ppc64:"FMADD"
 	// ppc64le:"FMADD"
+	// riscv64:"FMADDD"
 	return math.FMA(x, y, z)
+}
+
+func fms(x, y, z float64) float64 {
+	// riscv64:"FMSUBD"
+	return math.FMA(x, y, -z)
+}
+
+func fnma(x, y, z float64) float64 {
+	// riscv64:"FNMADDD"
+	return math.FMA(-x, y, z)
+}
+
+func fnms(x, y, z float64) float64 {
+	// riscv64:"FNMSUBD"
+	return math.FMA(x, -y, -z)
 }
 
 func fromFloat64(f64 float64) uint64 {
